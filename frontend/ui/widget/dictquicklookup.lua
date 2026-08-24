@@ -144,6 +144,19 @@ local T = require("ffi/util").template
 local ffiUtil  = require("ffi/util")
 local time = require("ui/time")
 
+local function definitionToNote(definition)
+    if not definition then return "" end
+
+    -- Preserve line breaks before removing markup, then decode entities using
+    -- KOReader's complete entity table (including numeric entities).
+    local text = definition:gsub("<[bB][rR] ?/?>", "\n")
+    text = util.htmlEntitiesToUtf8(text)
+    text = text:gsub("%b<>", "")
+    text = text:gsub("%s+", " ")
+    text = text:gsub("^%s*(.-)%s*$", "%1")
+    return text
+end
+
 --[[
 Display quick lookup word definition
 ]]
@@ -210,6 +223,8 @@ function DictQuickLookup:canSearch()
 end
 
 function DictQuickLookup:init()
+    -- An absent setting means enabled; an explicit false still disables it.
+    self.save_highlight = G_reader_settings:nilOrTrue("highlight_lookup_words")
     self.dict_font_size = G_reader_settings:readSetting("dict_font_size") or 20
     self.content_face = Font:getFace("cfont", self.dict_font_size)
     local font_size_alt = self.dict_font_size - 4
@@ -812,7 +827,7 @@ function DictQuickLookup:_getButtonPool()
         },
         highlight = {
             id = "highlight",
-            text = _("Highlight"),
+            text = self.save_highlight and _("Unhighlight") or _("Highlight"),
             enabled = not self:isDocless() and self.highlight ~= nil,
             callback = function()
                 self.save_highlight = not self.save_highlight
@@ -1628,8 +1643,16 @@ function DictQuickLookup:onClose(no_clear)
     end
 
     if self.save_highlight then
-        self.highlight:saveHighlight()
-        self.highlight:clear()
+        if self.highlight then
+            local index = self.highlight:saveHighlight(true)
+            local result = self.results and self.results[self.dict_index]
+            if index and result and G_reader_settings:nilOrTrue("save_dict_lookup_to_notes") then
+                local word = result.word or self.lookupword or self.word or ""
+                local note = word .. ": " .. definitionToNote(result.definition)
+                self.highlight:editNoteWithoutUI(index, true, note)
+            end
+            self.highlight:clear()
+        end
     else
         if self.highlight and not no_clear then
             -- delay unhighlight of selection, so we can see where we stopped when

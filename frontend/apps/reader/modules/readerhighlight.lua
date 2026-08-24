@@ -586,6 +586,15 @@ function ReaderHighlight:addToMainMenu(menu_items)
         separator = true,
     })
     table.insert(hl_sub_item_table, {
+        text = _("Highlight lookup words by default"),
+        checked_func = function()
+            return G_reader_settings:nilOrTrue("highlight_lookup_words")
+        end,
+        callback = function()
+            G_reader_settings:flipNilOrTrue("highlight_lookup_words")
+        end,
+    })
+    table.insert(hl_sub_item_table, {
         text = _("Apply current style and color to all highlights"),
         callback = function()
             UIManager:show(ConfirmBox:new{
@@ -2346,6 +2355,16 @@ function ReaderHighlight:editNote(index, is_new_note, text)
         end
     end
     self.ui.bookmark:setBookmarkNote(index, is_new_note, text, note_updated_callback)
+end
+
+-- Save a note without displaying the note editor (used by automatic lookups).
+function ReaderHighlight:editNoteWithoutUI(index, is_new_note, text)
+    local note_updated_callback = function()
+        if self.view.highlight.note_mark then
+            UIManager:setDirty(self.dialog, "ui")
+        end
+    end
+    self.ui.bookmark:setBookmarkNoteWithoutUI(index, is_new_note, text, note_updated_callback)
 end
 
 function ReaderHighlight:editHighlightStyle(index)

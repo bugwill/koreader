@@ -98,8 +98,8 @@ function ReaderView:init()
         temp_drawer = "lighten",
         temp = {},
         saved_drawer = "lighten",
-        -- NOTE: Unfortunately, yellow tends to look like absolute ass on Kaleido panels...
-        saved_color = Screen:isColorEnabled() and "yellow" or "gray",
+        -- Gray is a readable default on both monochrome and color panels.
+        saved_color = "gray",
     }
     self.page_states = {}
     self.page_gap = {

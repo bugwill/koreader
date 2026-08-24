@@ -1,0 +1,51 @@
+name: KOReader Linux build
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    env:
+      CI: "1"
+      EMULATE_READER: "1"
+      KODEBUG: ""
+      MAKEFLAGS: "OUTPUT_DIR=build INSTALL_DIR=install PARALLEL_JOBS=3"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake build-essential ca-certificates cmake \
+            gcc-multilib gettext git libtool libtool-bin meson nasm \
+            ninja-build patch pkg-config python3 unzip wget
+
+      - name: Fetch third-party dependencies
+        run: make fetchthirdparty
+
+      - name: Build KOReader
+        run: make all
+
+      - name: Pack build result
+        run: tar -chzf koreader-emulator.tar.gz -C install koreader
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: koreader-emulator
+          path: koreader-emulator.tar.gz
+          if-no-files-found: error

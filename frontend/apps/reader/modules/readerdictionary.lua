@@ -352,6 +352,15 @@ function ReaderDictionary:addToMainMenu(menu_items)
                 separator = true,
             },
             {
+                text = _("Save dictionary lookup explanation to notes"),
+                checked_func = function()
+                    return G_reader_settings:nilOrTrue("save_dict_lookup_to_notes")
+                end,
+                callback = function()
+                    G_reader_settings:flipNilOrTrue("save_dict_lookup_to_notes")
+                end,
+            },
+            {
                 text = _("Dictionary lookup history"),
                 checked_func = function()
                     return not self.disable_lookup_history
