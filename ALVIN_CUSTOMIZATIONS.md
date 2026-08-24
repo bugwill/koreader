@@ -70,3 +70,13 @@
 ```
 
 KOReader launcher 的官方 release 配置默认不绑定发布签名。当前本机测试 APK 使用 Android debug keystore 签名，可直接安装测试；正式发布或覆盖已有正式签名版本时，必须改用同一个正式 keystore。
+
+## 启动时打开上次阅读的文件
+
+KOReader 已内置此功能，无需修改代码。在文件浏览器中依次选择：
+
+```text
+菜单 → Start with → last file
+```
+
+设置后，程序启动时会打开设置中记录的最近阅读文件（`lastfile`）。如果该文件已被移动、删除或无法访问，程序将无法自动打开它。
