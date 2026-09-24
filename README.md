@@ -41,6 +41,8 @@ Notes attached to PDF highlights—including text saved from dictionary or trans
 
 When the Stylus Annotations plugin is installed, its strokes are also embedded in writable PDFs as standard PDF ink (`/Ink`) annotations. The strokes are synchronized on document close and, when background saving is enabled, when the Android activity pauses or KOReader suspends. Repeated saves update KOReader-managed ink annotations without duplicating them or removing unrelated PDF annotations. The plugin's `.sdr/stylus_annotations.lua` sidecar remains available for editing the strokes in KOReader.
 
+In the reader's `Highlights` menu, `Highlight selected text without popup` immediately saves a text selection as a highlight when selection ends, without showing the Select/Highlight/Copy/Add note dialog. Single-word dictionary lookup behavior is unchanged.
+
 Please check the [user guide](http://koreader.rocks/user_guide/) and the [wiki][link-wiki] to discover more features and to help us document them.
 
 ## Screenshots

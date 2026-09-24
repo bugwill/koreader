@@ -586,6 +586,17 @@ function ReaderHighlight:addToMainMenu(menu_items)
         separator = true,
     })
     table.insert(hl_sub_item_table, {
+        text = _("Highlight selected text without popup"),
+        checked_func = function()
+            return G_reader_settings:isTrue("highlight_selection_without_popup")
+        end,
+        callback = function()
+            G_reader_settings:flipNilOrFalse("highlight_selection_without_popup")
+            self:updateHighlightDisabled()
+        end,
+        separator = true,
+    })
+    table.insert(hl_sub_item_table, {
         text = _("Highlight lookup words by default"),
         checked_func = function()
             return G_reader_settings:nilOrTrue("highlight_lookup_words")
@@ -2112,6 +2123,9 @@ function ReaderHighlight:onHoldRelease()
     if self.selected_text then
         if self.is_word_selection then
             self:lookupDictWord()
+        elseif G_reader_settings:isTrue("highlight_selection_without_popup") then
+            self:saveHighlight(true)
+            self:clear()
         else
             if long_final_hold or default_highlight_action == "ask" then
                 -- bypass default action and show popup if long final hold
@@ -2154,13 +2168,18 @@ end
 function ReaderHighlight:onSetHighlightAction(action_num, no_notification)
     local v = long_press_action[action_num]
     G_reader_settings:saveSetting("default_highlight_action", v[2])
-    self.view.highlight.disabled = v[2] == "nothing"
+    self:updateHighlightDisabled()
     if not no_notification then -- fired with a gesture
         UIManager:show(Notification:new{
             text = T(_("Default highlight action changed to '%1'."), v[1]),
         })
     end
     return true
+end
+
+function ReaderHighlight:updateHighlightDisabled()
+    self.view.highlight.disabled = G_reader_settings:readSetting("default_highlight_action") == "nothing"
+        and not G_reader_settings:isTrue("highlight_selection_without_popup")
 end
 
 function ReaderHighlight:onCycleHighlightAction()
@@ -2935,7 +2954,7 @@ function ReaderHighlight:onReadSettings(config)
         or G_reader_settings:readSetting("highlight_drawing_style") or self.view.highlight.saved_drawer
     self.view.highlight.saved_color = config:readSetting("highlight_color")
         or G_reader_settings:readSetting("highlight_color") or self.view.highlight.saved_color
-    self.view.highlight.disabled = G_reader_settings:readSetting("default_highlight_action") == "nothing"
+    self:updateHighlightDisabled()
     self:setSelectionColor()
     self.allow_corner_scroll = G_reader_settings:nilOrTrue("highlight_corner_scroll")
 
