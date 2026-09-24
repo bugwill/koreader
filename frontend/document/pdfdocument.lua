@@ -276,19 +276,37 @@ function PdfDocument:deleteHighlight(pageno, item)
     page:close()
 end
 
-function PdfDocument:updateHighlightContents(pageno, item, contents)
+function PdfDocument:updateHighlightContents(pageno, item, contents, annot_color)
     local can_write = self:_checkIfWritable()
     if can_write ~= true then return can_write end
 
-    self.is_edited = true
     local quadpoints, n = _quadpointsFromPboxes(item.pboxes)
     local page = self._document:openPage(pageno)
     local annot = page:getMarkupAnnotation(quadpoints, n)
+    if annot == nil then
+        -- The highlight may be missing (or its coordinates may have been rounded
+        -- by another PDF implementation). Preserve the note by creating the
+        -- corresponding markup annotation before setting its contents.
+        logger.warn("PDF highlight not found while saving its note; creating annotation")
+        local annot_type = C.PDF_ANNOT_HIGHLIGHT
+        if item.drawer == "underscore" then
+            annot_type = C.PDF_ANNOT_UNDERLINE
+        elseif item.drawer == "strikeout" then
+            annot_type = C.PDF_ANNOT_STRIKE_OUT
+        end
+        page:addMarkupAnnotation(quadpoints, n, annot_type, annot_color)
+        item.pboxes = _quadpointsToPboxes(quadpoints, n)
+        annot = page:getMarkupAnnotation(quadpoints, n)
+    end
     if annot ~= nil then
         page:updateMarkupAnnotation(annot, contents)
+        self.is_edited = true
         self:resetTileCacheValidity()
+    else
+        logger.err("Could not find or create PDF highlight annotation for note")
     end
     page:close()
+    return annot ~= nil
 end
 
 function PdfDocument:getEmbeddedAnnotations()
@@ -307,6 +325,7 @@ end
 function PdfDocument:writeDocument()
     logger.info("writing document to", self.file)
     self._document:writeDocument(self.file)
+    self.is_edited = false
 end
 
 function PdfDocument:close()

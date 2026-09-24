@@ -33,6 +33,12 @@
 
 * **and much more**: look up words with StarDict dictionaries / Wikipedia, add your own online OPDS catalogs and RSS feeds, over-the-air software updates, an FTP client, an SSH server, …
 
+### Android PDF annotation saving
+
+For writable PDF files, saving KOReader highlights into the PDF is enabled by default. In the reader's highlight menu, `Write highlights into PDF` controls embedding, and `Save PDF highlights and notes on background` controls saving edited PDFs when KOReader is suspended or Android destroys the reading activity. Both default to on when unset; an explicitly saved global off choice is respected.
+
+Notes attached to PDF highlights—including text saved from dictionary or translation lookups—are written as PDF annotation contents. The `Write all highlights into PDF file` command syncs existing highlights and their notes; the PDF file is committed when it is closed or saved on background. If the PDF is in a read-only location, annotations remain in KOReader's settings instead of being written into the PDF.
+
 Please check the [user guide](http://koreader.rocks/user_guide/) and the [wiki][link-wiki] to discover more features and to help us document them.
 
 ## Screenshots

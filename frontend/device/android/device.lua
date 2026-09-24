@@ -149,6 +149,9 @@ function Device:init()
             if ev.code == C.APP_CMD_SAVE_STATE then
                 UIManager:broadcastEvent(Event:new("FlushSettings"))
             elseif ev.code == C.APP_CMD_DESTROY then
+                -- The task may be swiped away from Android's recent-apps
+                -- screen without a normal KOReader close event.
+                UIManager:broadcastEvent(Event:new("Suspend"))
                 UIManager:quit()
             elseif ev.code == C.APP_CMD_GAINED_FOCUS
                 or ev.code == C.APP_CMD_INIT_WINDOW

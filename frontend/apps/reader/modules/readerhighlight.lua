@@ -625,7 +625,7 @@ function ReaderHighlight:addToMainMenu(menu_items)
         table.insert(hl_sub_item_table, {
             text_func = function()
                 local text = self.highlight_write_into_pdf and _("on") or _("off")
-                if (not self.highlight_write_into_pdf) == (not G_reader_settings:isTrue("highlight_write_into_pdf")) then
+                if (not self.highlight_write_into_pdf) == (not G_reader_settings:nilOrTrue("highlight_write_into_pdf")) then
                     text = text .. star
                 end
                 return T(_("Write highlights into PDF: %1"), text)
@@ -634,7 +634,7 @@ function ReaderHighlight:addToMainMenu(menu_items)
                 {
                     text_func = function()
                         local text = _("On")
-                        return G_reader_settings:isTrue("highlight_write_into_pdf") and text .. star or text
+                        return G_reader_settings:nilOrTrue("highlight_write_into_pdf") and text .. star or text
                     end,
                     checked_func = function()
                         return self.highlight_write_into_pdf
@@ -666,7 +666,7 @@ If you wish your highlights to be saved in the document, just move it to a writa
                 {
                     text_func = function()
                         local text = _("Off")
-                        return G_reader_settings:hasNot("highlight_write_into_pdf") and text .. star or text
+                        return G_reader_settings:isFalse("highlight_write_into_pdf") and text .. star or text
                     end,
                     checked_func = function()
                         return not self.highlight_write_into_pdf
@@ -676,9 +676,19 @@ If you wish your highlights to be saved in the document, just move it to a writa
                         self.highlight_write_into_pdf = false
                     end,
                     hold_callback = function(touchmenu_instance)
-                        G_reader_settings:delSetting("highlight_write_into_pdf")
+                        G_reader_settings:makeFalse("highlight_write_into_pdf")
                         touchmenu_instance:updateItems()
                     end,
+                },
+                {
+                    text = _("Save PDF highlights and notes on background"),
+                    checked_func = function()
+                        return G_reader_settings:nilOrTrue("highlight_write_into_pdf_on_suspend")
+                    end,
+                    callback = function()
+                        G_reader_settings:flipNilOrTrue("highlight_write_into_pdf_on_suspend")
+                    end,
+                    separator = true,
                 },
                 {
                     text = _("Show reminder on book opening"),
@@ -2279,7 +2289,10 @@ function ReaderHighlight:writePdfAnnotation(action, item, content)
         elseif action_ == "delete" then
             self.document:deleteHighlight(page_, item_)
         elseif action_ == "content" then
-            self.document:updateHighlightContents(page_, item_, content_)
+            local color = (item_.color and item_.color ~= "gray") and self:getHighlightColor(item_.color) or nil
+            if self.document:updateHighlightContents(page_, item_, content_, color) ~= true then
+                logger.warn("Could not write note into PDF highlight")
+            end
         end
     end
     if item.pos0.page == item.pos1.page then -- single-page highlight
@@ -2292,6 +2305,20 @@ function ReaderHighlight:writePdfAnnotation(action, item, content)
                 item.ext[hl_page].pboxes = hl_part.pboxes
             end
         end
+    end
+end
+
+function ReaderHighlight:onSuspend()
+    if not G_reader_settings:nilOrTrue("highlight_write_into_pdf_on_suspend")
+        or not (self.document.is_pdf and self.highlight_write_into_pdf and self.document:isEdited()) then
+        return
+    end
+
+    -- Save embedded PDF annotations before the app/device suspends. Keep the
+    -- document dirty if the write fails so the regular close path can retry.
+    local ok, err = pcall(self.document.writeDocument, self.document)
+    if not ok then
+        logger.err("Failed to write PDF highlights on suspend:", err)
     end
 end
 
@@ -2857,9 +2884,20 @@ function ReaderHighlight:onReadSettings(config)
     if self.ui.paging then
         if self.document.is_pdf and self.document:_checkIfWritable() then
             if config:has("highlight_write_into_pdf") then
-                self.highlight_write_into_pdf = config:isTrue("highlight_write_into_pdf") -- true or false
+                -- Older releases saved the effective default (off) per book,
+                -- which would otherwise override the new global default (on).
+                -- Preserve explicit per-book choices going forward, while
+                -- migrating legacy off values when the global setting was unset.
+                if config:has("highlight_write_into_pdf_default_on_migrated") then
+                    self.highlight_write_into_pdf = config:isTrue("highlight_write_into_pdf")
+                elseif not config:isTrue("highlight_write_into_pdf")
+                    and G_reader_settings:hasNot("highlight_write_into_pdf") then
+                    self.highlight_write_into_pdf = true
+                else
+                    self.highlight_write_into_pdf = config:isTrue("highlight_write_into_pdf")
+                end
             else
-                self.highlight_write_into_pdf = G_reader_settings:readSetting("highlight_write_into_pdf") -- true or nil
+                self.highlight_write_into_pdf = G_reader_settings:nilOrTrue("highlight_write_into_pdf")
             end
         end
         local ext = util.getFileNameSuffix(self.ui.document.file)
@@ -2905,6 +2943,9 @@ function ReaderHighlight:onSaveSettings()
     self.ui.doc_settings:saveSetting("highlight_drawer", self.view.highlight.saved_drawer)
     self.ui.doc_settings:saveSetting("highlight_color", self.view.highlight.saved_color)
     self.ui.doc_settings:saveSetting("highlight_write_into_pdf", self.highlight_write_into_pdf)
+    if self.document.is_pdf then
+        self.ui.doc_settings:saveSetting("highlight_write_into_pdf_default_on_migrated", true)
+    end
     self.ui.doc_settings:saveSetting("panel_zoom_enabled", self.panel_zoom_enabled)
 end
 

@@ -8,7 +8,11 @@ include $(KOR_BASE)/Makefile.defs
 
 RELEASE_DATE := $(shell git show -s --format=format:"%cd" --date=short HEAD)
 # We want VERSION to carry the version of the KOReader main repo, not that of koreader-base
-VERSION := $(shell git describe HEAD)
+VERSION := $(shell git describe HEAD 2>/dev/null)
+ifeq ($(strip $(VERSION)),)
+	# Exported source trees may not include tags. Keep the fallback parseable by version.lua.
+	VERSION := v$(subst -,.,$(RELEASE_DATE))-0-g$(shell git rev-parse --short=10 HEAD)
+endif
 RELEASE_EPOCH := $(shell git log -1 --format='%cs' $(word 1,$(subst -, ,$(VERSION))))
 # Only append date if we're not on a whole version, like v2018.11
 ifneq (,$(findstring -,$(VERSION)))
