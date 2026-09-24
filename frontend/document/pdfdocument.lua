@@ -4,6 +4,7 @@ local DocCache = require("document/doccache")
 local DocSettings = require("docsettings")
 local Document = require("document/document")
 local DrawContext = require("ffi/drawcontext")
+local Blitbuffer = require("ffi/blitbuffer")
 local logger = require("logger")
 local util = require("util")
 local ffi = require("ffi")
@@ -307,6 +308,159 @@ function PdfDocument:updateHighlightContents(pageno, item, contents, annot_color
     end
     page:close()
     return annot ~= nil
+end
+
+local STYLUS_ANNOTATION_PREFIX = "KOReaderStylus:"
+
+local function isFiniteNumber(value)
+    return type(value) == "number" and value == value
+        and value ~= math.huge and value ~= -math.huge
+end
+
+local function getStylusColor(stroke, highlight, night_mode)
+    local color = stroke.color
+    if type(color) ~= "string" then return end
+    color = color:lower()
+    local bb_color
+    if color == "black" then
+        bb_color = Blitbuffer.colorFromString("#000000")
+    elseif color == "white" then
+        bb_color = Blitbuffer.colorFromString("#FFFFFF")
+    elseif highlight and highlight.getHighlightColor then
+        -- Match the plugin's renderer, including custom PDF highlight colors
+        -- and night mode.
+        bb_color = highlight:getHighlightColor(color, nil, night_mode)
+    else
+        local custom_colors = G_reader_settings:readSetting("highlight_custom_colors", {})
+        local custom_color = custom_colors[color]
+        local hex = custom_color and custom_color.code or Blitbuffer.HIGHLIGHT_COLORS[color]
+        if color == "gray" then
+            bb_color = Blitbuffer.gray(G_reader_settings:readSetting("highlight_lighten_factor") or 0.2)
+        elseif color:match("^#%x%x%x%x%x%x$") or color:match("^#%x%x%x%x%x%x%x%x$") then
+            bb_color = Blitbuffer.colorFromString(color)
+        elseif hex then
+            bb_color = Blitbuffer.colorFromString(hex)
+        end
+    end
+    if not bb_color then return end
+    local rgb = bb_color:getColorRGB32()
+    return { r = rgb.r, g = rgb.g, b = rgb.b }
+end
+
+local function makeStylusAnnotationName(pageno, index, stroke, points, color, width, opacity)
+    -- Use a compact deterministic name so repeated writes can retain unchanged
+    -- annotations and remove strokes that were erased in the plugin.
+    local hash = 5381
+    local function add(value)
+        value = tostring(value)
+        for i = 1, #value do
+            hash = (hash * 33 + value:byte(i)) % 2147483647
+        end
+    end
+    add(pageno)
+    add(index)
+    add(width)
+    add(opacity)
+    add(stroke.color or "")
+    add(color.r)
+    add(color.g)
+    add(color.b)
+    for _, point in ipairs(points) do
+        add(point.x)
+        add(point.y)
+    end
+    return STYLUS_ANNOTATION_PREFIX .. pageno .. ":" .. index .. ":" .. math.floor(hash)
+end
+
+local function prepareStylusAnnotations(strokes, page_count, highlight, night_mode)
+    local desired = {}
+    local page_indexes = {}
+    local count = 0
+    for _, stroke in ipairs(strokes or {}) do
+        local pageno = tonumber(stroke.page)
+        local coords = stroke.points
+        if isFiniteNumber(pageno) and pageno == math.floor(pageno)
+            and pageno >= 1 and pageno <= page_count
+            and type(coords) == "table" and #coords >= 2 and #coords % 2 == 0 then
+            local points, valid = {}, true
+            for i = 1, #coords, 2 do
+                local x, y = coords[i], coords[i + 1]
+                if not isFiniteNumber(x) or not isFiniteNumber(y) then
+                    valid = false
+                    break
+                end
+                -- The plugin persists coordinates at quarter-point precision.
+                -- Export the same coordinates so the PDF and plugin sidecar stay aligned.
+                points[#points + 1] = {
+                    x = math.floor(x * 4 + 0.5) / 4,
+                    y = math.floor(y * 4 + 0.5) / 4,
+                }
+            end
+            local color = getStylusColor(stroke, highlight, night_mode)
+            local width = tonumber(stroke.width) or 1
+            local opacity = tonumber(stroke.alpha) or 1
+            if valid and color and isFiniteNumber(width) and width > 0
+                and isFiniteNumber(opacity) then
+                opacity = math.max(0, math.min(1, opacity))
+                page_indexes[pageno] = (page_indexes[pageno] or 0) + 1
+                local index = page_indexes[pageno]
+                local name = makeStylusAnnotationName(pageno, index, stroke, points, color, width, opacity)
+                desired[pageno] = desired[pageno] or {}
+                desired[pageno][name] = {
+                    points = points,
+                    color = color,
+                    width = width,
+                    opacity = opacity,
+                }
+                count = count + 1
+            end
+        end
+    end
+    return desired, count
+end
+
+function PdfDocument:syncStylusAnnotations(strokes, highlight, night_mode)
+    local can_write = self:_checkIfWritable()
+    if can_write ~= true then return can_write end
+
+    local desired, count = prepareStylusAnnotations(
+        strokes, self.info.number_of_pages, highlight, night_mode)
+    local changed = false
+    for pageno = 1, self.info.number_of_pages do
+        local page = self._document:openPage(pageno)
+        local ok, err = pcall(function()
+            local existing = page:getInkAnnotationsWithNamePrefix(STYLUS_ANNOTATION_PREFIX)
+            local existing_by_name = {}
+            for _, annotation in ipairs(existing) do
+                existing_by_name[annotation.name] = annotation.annot
+            end
+
+            local page_desired = desired[pageno] or {}
+            for name, annot in pairs(existing_by_name) do
+                if not page_desired[name] then
+                    page:deleteAnnotation(annot)
+                    changed = true
+                end
+            end
+
+            for name, annotation in pairs(page_desired) do
+                if not existing_by_name[name] then
+                    page:addInkAnnotation(
+                        { annotation.points }, annotation.color, annotation.width,
+                        annotation.opacity, name)
+                    changed = true
+                end
+            end
+        end)
+        page:close()
+        if not ok then error(err) end
+    end
+
+    if changed then
+        self.is_edited = true
+        self:resetTileCacheValidity()
+    end
+    return true, count
 end
 
 function PdfDocument:getEmbeddedAnnotations()

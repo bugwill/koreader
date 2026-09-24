@@ -219,6 +219,10 @@ function Device:init()
                     end
                 end
             elseif ev.code == C.APP_CMD_PAUSE then
+                -- Saving edited PDFs must not depend on the Android device's
+                -- suspend lifecycle, which is disabled on devices marked as
+                -- having a broken lifecycle.
+                UIManager:broadcastEvent(Event:new("AppPaused"))
                 if not android.prop.brokenLifecycle then
                     UIManager:broadcastEvent(Event:new("RequestSuspend"))
                 end

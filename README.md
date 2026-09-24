@@ -35,9 +35,11 @@
 
 ### Android PDF annotation saving
 
-For writable PDF files, saving KOReader highlights into the PDF is enabled by default. In the reader's highlight menu, `Write highlights into PDF` controls embedding, and `Save PDF highlights and notes on background` controls saving edited PDFs when KOReader is suspended or Android destroys the reading activity. Both default to on when unset; an explicitly saved global off choice is respected.
+For writable PDF files, saving KOReader highlights into the PDF is enabled by default. In the reader's highlight menu, `Write highlights into PDF` controls embedding, and `Save PDF highlights and notes on background` controls saving edited PDFs when KOReader or its Android activity is paused, suspended, or destroyed. Both default to on when unset; an explicitly saved global off choice is respected.
 
-Notes attached to PDF highlights—including text saved from dictionary or translation lookups—are written as PDF annotation contents. The `Write all highlights into PDF file` command syncs existing highlights and their notes; the PDF file is committed when it is closed or saved on background. If the PDF is in a read-only location, annotations remain in KOReader's settings instead of being written into the PDF.
+Notes attached to PDF highlights—including text saved from dictionary or translation lookups—are written as PDF annotation contents. The `Write all highlights into PDF file` command syncs existing highlights and their notes and immediately writes the PDF to disk. Other edits are committed when the document is closed or saved on background. If the PDF is in a read-only location, annotations remain in KOReader's settings instead of being written into the PDF.
+
+When the Stylus Annotations plugin is installed, its strokes are also embedded in writable PDFs as standard PDF ink (`/Ink`) annotations. The strokes are synchronized on document close and, when background saving is enabled, when the Android activity pauses or KOReader suspends. Repeated saves update KOReader-managed ink annotations without duplicating them or removing unrelated PDF annotations. The plugin's `.sdr/stylus_annotations.lua` sidecar remains available for editing the strokes in KOReader.
 
 Please check the [user guide](http://koreader.rocks/user_guide/) and the [wiki][link-wiki] to discover more features and to help us document them.
 

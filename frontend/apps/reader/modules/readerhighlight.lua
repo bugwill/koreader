@@ -721,6 +721,18 @@ If you wish your highlights to be saved in the document, just move it to a writa
                                         end
                                     end
                                 end
+                                local stylus_ok, stylus_err = pcall(self.syncStylusAnnotationsToPdf, self)
+                                if not stylus_ok then
+                                    logger.err("Failed to sync Stylus Annotations into PDF:", stylus_err)
+                                end
+                                local ok, err = pcall(self.document.writeDocument, self.document)
+                                if not ok then
+                                    logger.err("Failed to write PDF annotations:", err)
+                                    UIManager:show(InfoMessage:new{
+                                        text = _("Failed to write PDF annotations to the file."),
+                                    })
+                                    return
+                                end
                                 UIManager:show(Notification:new{
                                     text = T(N_("1 highlight written into PDF file",
                                         "%1 highlights written into PDF file", count), count),
@@ -2308,18 +2320,65 @@ function ReaderHighlight:writePdfAnnotation(action, item, content)
     end
 end
 
-function ReaderHighlight:onSuspend()
+function ReaderHighlight:syncStylusAnnotationsToPdf()
+    if not (self.document.is_pdf and self.highlight_write_into_pdf) then
+        return false
+    end
+    local stylus = self.view.view_modules and self.view.view_modules.stylus_annotations
+    if not (stylus and stylus.store and stylus.store.strokes
+        and stylus.saveStrokes and self.document.syncStylusAnnotations) then
+        return false
+    end
+
+    -- Flush a stroke and the plugin's debounced sidecar write before syncing its
+    -- in-memory points into MuPDF. This also runs during document close, before
+    -- PdfDocument commits the modified PDF.
+    if stylus.current_stroke and stylus.endStroke then
+        stylus:endStroke()
+    end
+    if stylus.pending_save then
+        UIManager:unschedule(stylus.pending_save)
+        stylus.pending_save = nil
+    end
+    stylus:saveStrokes()
+    return self.document:syncStylusAnnotations(stylus.store.strokes, self, Screen.night_mode)
+end
+
+function ReaderHighlight:onCloseDocument()
+    if self.document.is_pdf and self.highlight_write_into_pdf then
+        local ok, err = pcall(self.syncStylusAnnotationsToPdf, self)
+        if not ok then
+            logger.err("Failed to sync Stylus Annotations into PDF:", err)
+        end
+    end
+end
+
+function ReaderHighlight:savePdfAnnotationsOnBackground()
     if not G_reader_settings:nilOrTrue("highlight_write_into_pdf_on_suspend")
-        or not (self.document.is_pdf and self.highlight_write_into_pdf and self.document:isEdited()) then
+        or not (self.document.is_pdf and self.highlight_write_into_pdf) then
         return
     end
+
+    local sync_ok, sync_err = pcall(self.syncStylusAnnotationsToPdf, self)
+    if not sync_ok then
+        logger.err("Failed to sync Stylus Annotations into PDF in background:", sync_err)
+    end
+    if not self.document:isEdited() then return end
 
     -- Save embedded PDF annotations before the app/device suspends. Keep the
     -- document dirty if the write fails so the regular close path can retry.
     local ok, err = pcall(self.document.writeDocument, self.document)
     if not ok then
-        logger.err("Failed to write PDF highlights on suspend:", err)
+        logger.err("Failed to write PDF annotations in background:", err)
     end
+end
+
+function ReaderHighlight:onAppPaused()
+    self:savePdfAnnotationsOnBackground()
+end
+
+function ReaderHighlight:onSuspend()
+    self:savePdfAnnotationsOnBackground()
 end
 
 function ReaderHighlight:lookupWikipedia()
