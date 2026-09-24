@@ -1,6 +1,6 @@
 [submodule "koreader-base"]
 	path = base
-	url = https://github.com/koreader/koreader-base.git
+	url = https://github.com/bugwill/koreader-base.git
 [submodule "platform/android/luajit-launcher"]
 	path = platform/android/luajit-launcher
 	url = https://github.com/koreader/android-luajit-launcher.git
@@ -14,5 +14,5 @@
 	shallow = true
 [submodule "l10n"]
 	path = l10n
-	url = https://github.com/koreader/koreader-translations.git
+	url = https://github.com/bugwill/koreader-translations.git
 	shallow = true
