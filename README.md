@@ -39,7 +39,21 @@ For writable PDF files, saving KOReader highlights into the PDF is enabled by de
 
 Notes attached to PDF highlights—including text saved from dictionary or translation lookups—are written as PDF annotation contents. The `Write all highlights into PDF file` command syncs existing highlights and their notes and immediately writes the PDF to disk. Other edits are committed when the document is closed or saved on background. If the PDF is in a read-only location, annotations remain in KOReader's settings instead of being written into the PDF.
 
-When the Stylus Annotations plugin is installed, its strokes are also embedded in writable PDFs as standard PDF ink (`/Ink`) annotations. The strokes are synchronized on document close and, when background saving is enabled, when the Android activity pauses or KOReader suspends. Repeated saves update KOReader-managed ink annotations without duplicating them or removing unrelated PDF annotations. The plugin's `.sdr/stylus_annotations.lua` sidecar remains available for editing the strokes in KOReader.
+When the Stylus Annotations plugin is installed, its strokes are also embedded in writable PDFs as standard PDF ink (`/Ink`) annotations named `KOReaderStylus:<page>:<index>:<hash>`. The strokes are synchronized on document close and, when background saving is enabled, when the Android activity pauses or KOReader suspends. Repeated saves update KOReader-managed ink annotations without duplicating them and remove the copies of erased strokes. The plugin's `.sdr/stylus_annotations.lua` sidecar remains the source of truth for the strokes in KOReader.
+
+Ink annotations written by other apps are imported as well: when a PDF opens (with `Write highlights into PDF` on), the plugin turns every ink stroke it does not know yet into a stroke of its own, and the other app's annotation is replaced by a KOReader-managed copy on the next save. They can then be erased like any stroke. Imported strokes keep their points, width and opacity; colors map to the nearest highlight color. Other annotation types (highlights, notes, shapes) are left alone.
+
+#### Saving PDFs more than once per session
+
+MuPDF writes an incremental update at the file size it saw when the document was opened, and does not follow the file after saving. A second incremental save of the same opened document was therefore written over the first one while its trailer (`/Prev`) still pointed at the overwritten cross-reference table: the PDF broke, MuPDF repaired it on the next open (`trying to repair broken xref`) and then refused all further incremental writes (`Can't do incremental writes on a repaired file`). With background saving this happened as soon as KOReader was sent to the background twice with changes in between.
+
+`PdfDocument:writeDocument()` now saves incrementally only the first time per opened document. Later saves, and saves after an incremental write failed (e.g. a repaired file), write the whole PDF to `<file>.koreader-tmp` and atomically rename it over the original; MuPDF keeps reading the opened document through its existing file handle. Already damaged PDFs become writable again this way.
+
+#### MuPDF API additions for ink annotations
+
+- `base/wrap-mupdf.h` (with `base/ffi-cdecl/wrap-mupdf_cdecl.c` and `base/ffi/mupdf_h.lua`): exception-safe wrappers `mupdf_pdf_annot_ink_list_count`, `mupdf_pdf_annot_ink_list_stroke_count`, `mupdf_pdf_annot_ink_list_stroke_vertex`, `mupdf_pdf_annot_color`, `mupdf_pdf_annot_border_width` and `mupdf_pdf_annot_opacity`.
+- `base/ffi/mupdf.lua`: `page:getInkAnnotations()` returns each ink annotation's strokes (points in page space, the space `page:addInkAnnotation()` takes), RGB color, border width, opacity and `/NM` name.
+- `frontend/document/pdfdocument.lua`: `PdfDocument:getInkAnnotations()` lists the ink annotations of all pages (flagging `KOReaderStylus` copies with `is_stylus`), and `PdfDocument:deleteForeignInkAnnotations()` removes the other apps' ones after a plugin imported them.
 
 In the reader's `Highlights` menu, `Highlight selected text without popup` immediately saves a text selection as a highlight when selection ends, without showing the Select/Highlight/Copy/Add note dialog. Single-word dictionary lookup behavior is unchanged.
 

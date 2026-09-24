@@ -463,6 +463,62 @@ function PdfDocument:syncStylusAnnotations(strokes, highlight, night_mode)
     return true, count
 end
 
+--[[--
+Read the ink annotations of all pages, so a stylus plugin can import them.
+
+Returns a list of `{ page, name, strokes, color, width, opacity, is_stylus }`,
+see mupdf page:getInkAnnotations(); `is_stylus` marks the copies written by
+syncStylusAnnotations().
+--]]
+function PdfDocument:getInkAnnotations()
+    local result = {}
+    for pageno = 1, self.info.number_of_pages do
+        local page = self._document:openPage(pageno)
+        local ok, err = pcall(function()
+            for _, annotation in ipairs(page:getInkAnnotations()) do
+                annotation.annot = nil
+                annotation.page = pageno
+                annotation.is_stylus = annotation.name ~= nil
+                    and annotation.name:sub(1, #STYLUS_ANNOTATION_PREFIX) == STYLUS_ANNOTATION_PREFIX
+                result[#result + 1] = annotation
+            end
+        end)
+        page:close()
+        if not ok then error(err) end
+    end
+    return result
+end
+
+--[[--
+Delete ink annotations not written by syncStylusAnnotations(), after a stylus
+plugin imported them: the next sync writes them back as its own copies, so
+they can then be erased like any other stroke.
+--]]
+function PdfDocument:deleteForeignInkAnnotations()
+    local can_write = self:_checkIfWritable()
+    if can_write ~= true then return can_write end
+    local deleted = 0
+    for pageno = 1, self.info.number_of_pages do
+        local page = self._document:openPage(pageno)
+        local ok, err = pcall(function()
+            for _, annotation in ipairs(page:getInkAnnotations()) do
+                local name = annotation.name
+                if not (name and name:sub(1, #STYLUS_ANNOTATION_PREFIX) == STYLUS_ANNOTATION_PREFIX) then
+                    page:deleteAnnotation(annotation.annot)
+                    deleted = deleted + 1
+                end
+            end
+        end)
+        page:close()
+        if not ok then error(err) end
+    end
+    if deleted > 0 then
+        self.is_edited = true
+        self:resetTileCacheValidity()
+    end
+    return true, deleted
+end
+
 function PdfDocument:getEmbeddedAnnotations()
     local annotations = {}
     for pageno = 1, self.info.number_of_pages do
@@ -476,9 +532,48 @@ function PdfDocument:getEmbeddedAnnotations()
     return next(annotations) and annotations
 end
 
+-- Write a complete copy of the document next to the original, then atomically
+-- replace the original with it. MuPDF keeps reading the opened document through
+-- its existing file handle, which still refers to the replaced file.
+function PdfDocument:_writeDocumentFull()
+    local tmp_file = self.file .. ".koreader-tmp"
+    os.remove(tmp_file)
+    -- A different target path makes MuPDF write a full (non-incremental) PDF.
+    local ok, err = pcall(self._document.writeDocument, self._document, tmp_file)
+    if not ok then
+        os.remove(tmp_file)
+        error(err, 0)
+    end
+    local renamed, rename_err = os.rename(tmp_file, self.file)
+    if not renamed then
+        os.remove(tmp_file)
+        error("could not replace " .. self.file .. ": " .. tostring(rename_err), 0)
+    end
+end
+
 function PdfDocument:writeDocument()
     logger.info("writing document to", self.file)
-    self._document:writeDocument(self.file)
+    -- MuPDF appends an incremental update at the file size it saw when the
+    -- document was opened and does not track the file after saving. A second
+    -- incremental save of the same opened document is therefore written over
+    -- the first one, while its trailer still points (/Prev) at the overwritten
+    -- xref: the PDF breaks, MuPDF "repairs" it on the next open and then refuses
+    -- incremental writes to it. This happens as soon as annotations are saved
+    -- more than once per session (e.g. on every trip to the background).
+    -- So only the first save of an opened document is incremental; later saves,
+    -- and saves that cannot be incremental (repaired files), rewrite the whole
+    -- document.
+    if not self.has_written_document then
+        local ok, err = pcall(self._document.writeDocument, self._document, self.file)
+        if ok then
+            self.has_written_document = true
+            self.is_edited = false
+            return
+        end
+        logger.warn("incremental PDF write failed, rewriting the whole document:", err)
+    end
+    self:_writeDocumentFull()
+    self.has_written_document = true
     self.is_edited = false
 end
 
