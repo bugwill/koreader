@@ -218,7 +218,7 @@ function filemanagerutil.genResetSettingsButton(doc_settings_or_file, caller_cal
                 end,
             }
             check_button_settings = CheckButton:new{
-                text = _("document settings, progress, bookmarks, highlights, notes"),
+                text = _("document settings, progress, bookmarks, highlights, notes, handwriting"),
                 checked = has_sidecar_file,
                 enabled = has_sidecar_file,
                 parent = confirmbox,

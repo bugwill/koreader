@@ -246,4 +246,84 @@ describe("docsettings module", function()
             -- a:b v.s. a:a
         end)
     end)
+
+    describe("plugin sidecar files", function()
+        local writeFile = function(path, content)
+            local f = io.open(path, "w")
+            f:write(content)
+            f:close()
+        end
+
+        it("should remove stylus_annotations.lua and the sdr folder on book deletion", function()
+            G_reader_settings:saveSetting("document_metadata_folder", "doc")
+            local file = "/tmp/docsettings_stylus_delete.pdf"
+            writeFile(file, "pdf")
+            local sidecar_dir = docsettings:getSidecarDir(file)
+            lfs.mkdir(sidecar_dir)
+            writeFile(sidecar_dir .. "/stylus_annotations.lua", "return {}")
+            writeFile(sidecar_dir .. "/stylus_annotations.lua.old", "return {}")
+
+            os.remove(file)
+            docsettings.updateLocation(file)
+
+            assert.is_nil(lfs.attributes(sidecar_dir .. "/stylus_annotations.lua", "mode"))
+            assert.is_nil(lfs.attributes(sidecar_dir .. "/stylus_annotations.lua.old", "mode"))
+            assert.is_nil(lfs.attributes(sidecar_dir, "mode"))
+        end)
+
+        it("should remove stylus_annotations.lua on document reset", function()
+            G_reader_settings:saveSetting("document_metadata_folder", "doc")
+            local file = "/tmp/docsettings_stylus_reset.pdf"
+            writeFile(file, "pdf")
+            local sidecar_dir = docsettings:getSidecarDir(file)
+            lfs.mkdir(sidecar_dir)
+            writeFile(sidecar_dir .. "/stylus_annotations.lua", "return {}")
+
+            docsettings:open(file):purge(nil, { doc_settings = true })
+
+            assert.is_nil(lfs.attributes(sidecar_dir .. "/stylus_annotations.lua", "mode"))
+            assert.is_nil(lfs.attributes(sidecar_dir, "mode"))
+            os.remove(file)
+        end)
+
+        it("should keep stylus_annotations.lua when saving settings", function()
+            G_reader_settings:saveSetting("document_metadata_folder", "doc")
+            local file = "/tmp/docsettings_stylus_flush.pdf"
+            writeFile(file, "pdf")
+            local sidecar_dir = docsettings:getSidecarDir(file)
+            lfs.mkdir(sidecar_dir)
+            writeFile(sidecar_dir .. "/stylus_annotations.lua", "return {}")
+
+            local d = docsettings:open(file)
+            d:saveSetting("a", "a")
+            d:flush()
+
+            assert.Equals("file", lfs.attributes(sidecar_dir .. "/stylus_annotations.lua", "mode"))
+            os.remove(file)
+            docsettings.updateLocation(file)
+        end)
+
+        it("should move stylus_annotations.lua on book rename", function()
+            G_reader_settings:saveSetting("document_metadata_folder", "doc")
+            local file = "/tmp/docsettings_stylus_old.pdf"
+            local new_file = "/tmp/docsettings_stylus_new.pdf"
+            writeFile(file, "pdf")
+            local sidecar_dir = docsettings:getSidecarDir(file)
+            local new_sidecar_dir = docsettings:getSidecarDir(new_file)
+            lfs.mkdir(sidecar_dir)
+            writeFile(sidecar_dir .. "/stylus_annotations.lua", "return { 1 }")
+
+            os.rename(file, new_file)
+            docsettings.updateLocation(file, new_file)
+
+            assert.is_nil(lfs.attributes(sidecar_dir, "mode"))
+            local f = io.open(new_sidecar_dir .. "/stylus_annotations.lua", "r")
+            assert.Equals("return { 1 }", f:read("*a"))
+            f:close()
+
+            os.remove(new_file)
+            docsettings.updateLocation(new_file)
+            assert.is_nil(lfs.attributes(new_sidecar_dir, "mode"))
+        end)
+    end)
 end)

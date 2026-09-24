@@ -18,6 +18,8 @@ local HISTORY_DIR = DataStorage:getHistoryDir()
 local DOCSETTINGS_DIR = DataStorage:getDocSettingsDir()
 local DOCSETTINGS_HASH_DIR = DataStorage:getDocSettingsHashDir()
 local custom_metadata_filename = "custom_metadata.lua"
+-- Sidecar files written by plugins, moved and deleted together with the book metadata
+local extra_sidecar_filenames = { "stylus_annotations.lua" }
 
 function DocSettings.getSidecarStorage(location)
     if location == "dir" then
@@ -398,6 +400,12 @@ function DocSettings:purge(sidecar_to_keep, data_to_purge)
         end
     end
 
+    -- Remove plugin sidecar files, except the ones just moved by updateLocation()
+    if data_to_purge.doc_settings and not sidecar_to_keep then
+        self:purgeExtraSidecarFiles(self.extra_files_to_keep)
+        self.extra_files_to_keep = nil
+    end
+
     -- Remove custom
     if data_to_purge.custom_cover_file then
         os.remove(data_to_purge.custom_cover_file)
@@ -434,10 +442,11 @@ function DocSettings.updateLocation(doc_path, new_doc_path, copy)
     local has_sidecar_file = DocSettings:hasSidecarFile(doc_path)
     local custom_cover_file = DocSettings:findCustomCoverFile(doc_path)
     local custom_metadata_file = DocSettings:findCustomMetadataFile(doc_path)
-    if not (has_sidecar_file or custom_cover_file or custom_metadata_file) then return end
+    local extra_sidecar_files = DocSettings:findExtraSidecarFiles(doc_path)
+    if not (has_sidecar_file or custom_cover_file or custom_metadata_file or next(extra_sidecar_files)) then return end
 
     local doc_settings = DocSettings:open(doc_path)
-    local do_purge
+    local do_purge, extra_files_to_keep
 
     if new_doc_path then -- copy/rename/move
         if doc_path == new_doc_path -- move book metadata
@@ -459,6 +468,14 @@ function DocSettings.updateLocation(doc_path, new_doc_path, copy)
             if custom_metadata_file then
                 ffiutil.copyFile(custom_metadata_file, new_sidecar_dir .. "/" .. custom_metadata_filename)
             end
+            extra_files_to_keep = {}
+            for filename, file in pairs(extra_sidecar_files) do
+                local new_file = new_sidecar_dir .. "/" .. filename
+                if file ~= new_file and ffiutil.copyFile(file, new_file) ~= nil then
+                    new_file = file -- copy failed, keep the original
+                end
+                extra_files_to_keep[filename] = new_file
+            end
             do_purge = not copy
         end
     else -- delete
@@ -473,9 +490,49 @@ function DocSettings.updateLocation(doc_path, new_doc_path, copy)
     end
 
     if do_purge then
+        doc_settings.extra_files_to_keep = extra_files_to_keep
         doc_settings.custom_cover_file = custom_cover_file -- cache
         doc_settings.custom_metadata_file = custom_metadata_file -- cache
         doc_settings:purge()
+    end
+end
+
+-- extra sidecar files
+
+--- Returns a table of { filename = path } of the plugin sidecar files of the book.
+-- If a file exists in several locations, the one in the highest priority location is returned.
+function DocSettings:findExtraSidecarFiles(doc_path)
+    local files = {}
+    if doc_path == nil or doc_path == "" then return files end
+    for _, location in ipairs(getOrderedLocationCandidates()) do
+        local sidecar_dir = self:getSidecarDir(doc_path, location)
+        for _, filename in ipairs(extra_sidecar_filenames) do
+            local file = sidecar_dir .. "/" .. filename
+            if not files[filename] and isFile(file) then
+                files[filename] = file
+            end
+        end
+    end
+    return files
+end
+
+--- Removes the plugin sidecar files (and their backups) of the book from all locations.
+-- @tparam table files_to_keep { filename = path } of the files not to be removed
+function DocSettings:purgeExtraSidecarFiles(files_to_keep)
+    local kept = {}
+    for _, file in pairs(files_to_keep or {}) do
+        kept[file] = true
+    end
+    for _, sidecar_dir in ipairs({ self.doc_sidecar_dir, self.dir_sidecar_dir, self.hash_sidecar_dir }) do
+        for _, filename in ipairs(extra_sidecar_filenames) do
+            local file = sidecar_dir .. "/" .. filename
+            for _, f in ipairs({ file, file .. ".old" }) do
+                if not kept[file] and isFile(f) then
+                    os.remove(f)
+                    logger.dbg("DocSettings: purged:", f)
+                end
+            end
+        end
     end
 end
 
