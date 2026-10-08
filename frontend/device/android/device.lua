@@ -135,7 +135,30 @@ function Device:otaModel()
     return model, "link"
 end
 
+-- Bigme devices keep the display fixed to the system rotation: they ignore the
+-- orientation an app requests and letterbox its window instead.
+local function isBigme()
+    return lfs.attributes("/system/framework/xrz.framework.server.jar", "mode") == "file"
+end
+
+-- Whether KOReader rotates its own framebuffer instead of asking Android to
+-- rotate the window. Defaults to on for devices that ignore orientation requests.
+function Device:wantsSoftwareRotation()
+    local setting = G_reader_settings:readSetting("android_software_rotation")
+    if setting == nil then
+        return isBigme()
+    end
+    return setting
+end
+
 function Device:init()
+    self.software_rotation = self:wantsSoftwareRotation()
+    if self.software_rotation then
+        -- ffi/framebuffer_android then rotates the framebuffer in software.
+        android.hasNativeRotation = no
+        -- Undo any orientation requested earlier, so the window covers the whole panel.
+        android.orientation.set(C.ASCREEN_ORIENTATION_PORTRAIT)
+    end
     self.screen = require("ffi/framebuffer_android"):new{device = self, debug = logger.dbg}
     self.powerd = require("device/android/powerd"):new{device = self}
 

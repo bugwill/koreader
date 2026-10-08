@@ -61,6 +61,23 @@ If you need to do so, you'll have to use the UI toggles.]]),
             })
         end
 
+        if Device:isAndroid() then
+            table.insert(rotation_table, {
+                text = _("Rotate screen in KOReader"),
+                help_text = _([[
+When checked, KOReader rotates its own display instead of asking Android to rotate the window.
+Use this on devices that ignore rotation requests from apps and shrink the window instead (such as Bigme).
+This takes effect after restarting KOReader.]]),
+                checked_func = function()
+                    return Device:wantsSoftwareRotation()
+                end,
+                callback = function()
+                    G_reader_settings:saveSetting("android_software_rotation", not Device:wantsSoftwareRotation())
+                    UIManager:askForRestart()
+                end,
+            })
+        end
+
         table.insert(rotation_table, {
             text = _("Keep current rotation across views"),
             help_text = _([[
