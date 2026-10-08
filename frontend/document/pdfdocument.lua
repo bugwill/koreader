@@ -577,6 +577,22 @@ function PdfDocument:writeDocument()
     self.is_edited = false
 end
 
+-- Write a copy of the PDF file, as it is on disk, with the colors of all pages inverted.
+function PdfDocument:writeInvertedCopy(target_file)
+    local doc = pdf.openDocument(self.file)
+    local ok, err = pcall(function()
+        if doc:needsPassword() then
+            error("password protected PDFs are not supported", 0)
+        end
+        doc:invertColors()
+        doc:writeDocument(target_file)
+    end)
+    doc:close()
+    if not ok then
+        error(err, 0)
+    end
+end
+
 function PdfDocument:close()
     -- NOTE: We can't just rely on Document:close's return code for that, as we need self._document
     --       in :writeDocument, and it would have been destroyed.

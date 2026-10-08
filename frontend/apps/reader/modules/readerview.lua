@@ -8,6 +8,7 @@ local Device = require("device")
 local Font = require("ui/font")
 local Geom = require("ui/geometry")
 local Event = require("ui/event")
+local ConfirmBox = require("ui/widget/confirmbox")
 local IconWidget = require("ui/widget/iconwidget")
 local InfoMessage = require("ui/widget/infomessage")
 local Notification = require("ui/widget/notification")
@@ -672,13 +673,13 @@ function ReaderView:drawHighlightRect(bb, _x, _y, rect, drawer, color, draw_note
         if is_gray then
             bb:darkenRect(x, y, w, h, lighten_factor)
         else
-            if bb:getInverse() == 1 then
+            if bb:getInverse() == 1 or (self.ui.paging and self.document.invert_colors) then
                 -- MUL doesn't really work on a black background, so, switch to OVER if we're in software nightmode...
                 -- NOTE: If we do *not* invert the color here, it *will* get inverted by the blitter given that the target bb is inverted.
                 --       While not particularly pretty, this (roughly) matches with hardware nightmode, *and* how MuPDF renders highlights...
                 --       But it's *really* not pretty (https://github.com/koreader/koreader/pull/11044#issuecomment-1902886069), so we'll fix it ;p.
-                local c = Blitbuffer.ColorRGB32(color.r, color.g, color.b, 0xFF * lighten_factor):invert()
-                bb:blendRectRGB32(x, y, w, h, c)
+                local c = Blitbuffer.ColorRGB32(color.r, color.g, color.b, 0xFF * lighten_factor)
+                bb:blendRectRGB32(x, y, w, h, bb:getInverse() == 1 and c:invert() or c)
             else
                 bb:multiplyRectRGB(x, y, w, h, color)
             end
@@ -986,6 +987,9 @@ function ReaderView:onReadSettings(config)
         self.invert_ui_layout = G_reader_settings:isTrue("invert_ui_layout")
     end
     self.footer:invertProgressBar(self.invert_ui_layout)
+    if self.ui.paging then
+        self.document.invert_colors = config:isTrue("invert_document_colors")
+    end
     self.page_overlap_enable = config:isTrue("show_overlap_enable") or G_reader_settings:isTrue("page_overlap_enable") or G_defaults:readSetting("DSHOWOVERLAP")
     self.page_overlap_style = config:readSetting("page_overlap_style") or G_reader_settings:readSetting("page_overlap_style") or "dim"
     self.page_gap.height = Screen:scaleBySize(config:readSetting("kopt_page_gap_height")
@@ -1215,6 +1219,7 @@ function ReaderView:onSaveSettings()
         if self.document.is_djvu then
             self.ui.doc_settings:saveSetting("render_mode", self.render_mode)
         end
+        self.ui.doc_settings:saveSetting("invert_document_colors", self.document.invert_colors or nil)
     end
     -- Don't etch the current rotation in stone when sticky rotation is enabled
     if G_reader_settings:nilOrFalse("lock_rotation") then
@@ -1252,6 +1257,76 @@ function ReaderView:getRenderModeMenuTable()
             make_mode(_("COLOUR FOREGROUND (show only foreground)"), 5),
         }
     }
+end
+
+function ReaderView:getInvertDocumentColorsMenuTable()
+    return {
+        text = _("Invert document colors"),
+        checked_func = function()
+            return self.document.invert_colors
+        end,
+        callback = function()
+            self:onToggleInvertDocumentColors()
+        end,
+    }
+end
+
+function ReaderView:getSaveInvertedPdfMenuTable()
+    return {
+        text = _("Save color-inverted PDF copy"),
+        keep_menu_open = true,
+        callback = function()
+            local dir, filename = util.splitFilePathName(self.document.file)
+            local target_file = dir .. util.splitFileNameSuffix(filename) .. "_inverted.pdf"
+            local function save()
+                self:saveInvertedPdf(target_file)
+            end
+            if util.fileExists(target_file) then
+                UIManager:show(ConfirmBox:new{
+                    text = T(_("File already exists:\n%1\nOverwrite it?"), BD.filepath(target_file)),
+                    ok_text = _("Overwrite"),
+                    ok_callback = save,
+                })
+            else
+                save()
+            end
+        end,
+    }
+end
+
+function ReaderView:saveInvertedPdf(target_file)
+    -- The copy is made from the file on disk: write pending highlights and stylus strokes into it first.
+    local highlight = self.ui.highlight
+    if highlight and highlight.highlight_write_into_pdf then
+        local sync_ok, sync_err = pcall(highlight.syncStylusAnnotationsToPdf, highlight)
+        if not sync_ok then
+            logger.err("Failed to sync Stylus Annotations into PDF:", sync_err)
+        end
+        if self.document:isEdited() then
+            local ok, err = pcall(self.document.writeDocument, self.document)
+            if not ok then
+                logger.err("Failed to write PDF annotations:", err)
+            end
+        end
+    end
+    local ok, err = pcall(self.document.writeInvertedCopy, self.document, target_file)
+    if not ok then
+        logger.err("Failed to save color-inverted PDF:", err)
+        UIManager:show(InfoMessage:new{
+            text = T(_("Failed to save color-inverted PDF:\n%1"), tostring(err)),
+        })
+        return
+    end
+    UIManager:show(InfoMessage:new{
+        text = T(_("Color-inverted PDF saved to:\n%1"), BD.filepath(target_file)),
+    })
+end
+
+function ReaderView:onToggleInvertDocumentColors()
+    if not self.ui.paging then return end
+    self.document.invert_colors = not self.document.invert_colors or nil
+    UIManager:setDirty(self.dialog, "full")
+    return true
 end
 
 function ReaderView:onCloseWidget()

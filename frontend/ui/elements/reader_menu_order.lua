@@ -64,6 +64,9 @@ local order = {
         "selection_text", -- if Device:hasDPad()
         "panel_zoom_options",
         "djvu_render_mode",
+        "invert_document_colors",
+        "save_inverted_pdf",
+        "stylus_annotations",
         "start_content_selection", -- if Device:hasDPad(), put this as last one so it is easy to select with "press" and "up" keys
     },
     setting = {

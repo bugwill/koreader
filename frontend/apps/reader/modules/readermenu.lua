@@ -289,6 +289,13 @@ Useful when used alongside 'Invert page turn taps and swipes'.]]),
         self.menu_items.djvu_render_mode = self.view:getRenderModeMenuTable()
     end
 
+    if self.ui.paging then
+        self.menu_items.invert_document_colors = self.view:getInvertDocumentColorsMenuTable()
+        if self.ui.document.is_pdf then
+            self.menu_items.save_inverted_pdf = self.view:getSaveInvertedPdfMenuTable()
+        end
+    end
+
     if Device:supportsScreensaver() then
         self.menu_items.screensaver = {
             text = _("Sleep screen"),

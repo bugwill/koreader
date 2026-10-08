@@ -589,7 +589,9 @@ function KoptInterface:hintReflowedPage(doc, pageno, zoom, rotation, hinting)
 end
 
 function KoptInterface:drawPage(doc, target, x, y, rect, pageno, zoom, rotation, gamma, saturation)
-    local nightmode_invert = doc.configurable.nightmode_document == 1 and Screen.night_mode
+    -- Inverting the document colors flips the page again, so it cancels the night mode re-inversion
+    local nightmode_invert = (doc.configurable.nightmode_document == 1 and Screen.night_mode or false)
+                          ~= (doc.invert_colors or false)
     if doc.configurable.text_wrap == 1 then
         self:drawContextPage(doc, target, x, y, rect, pageno, zoom, rotation, nightmode_invert)
     elseif self:is_optimizing_page(doc) then
