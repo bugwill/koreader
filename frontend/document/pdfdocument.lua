@@ -5,6 +5,7 @@ local DocSettings = require("docsettings")
 local Document = require("document/document")
 local DrawContext = require("ffi/drawcontext")
 local Blitbuffer = require("ffi/blitbuffer")
+local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local util = require("util")
 local ffi = require("ffi")
@@ -16,6 +17,8 @@ local PdfDocument = Document:extend{
     is_pdf = true,
     dc_null = DrawContext.new(),
     koptinterface = nil,
+    -- Annotations deleted since the file was last rewritten as a whole.
+    deleted_annotations = 0,
     provider = "mupdf",
     provider_name = "MuPDF",
 }
@@ -272,6 +275,7 @@ function PdfDocument:deleteHighlight(pageno, item)
     local annot = page:getMarkupAnnotation(quadpoints, n)
     if annot ~= nil then
         page:deleteAnnotation(annot)
+        self.deleted_annotations = self.deleted_annotations + 1
         self:resetTileCacheValidity()
     end
     page:close()
@@ -317,7 +321,7 @@ local function isFiniteNumber(value)
         and value ~= math.huge and value ~= -math.huge
 end
 
-local function getStylusColor(stroke, highlight, night_mode)
+local function getStylusColor(stroke, highlight)
     local color = stroke.color
     if type(color) ~= "string" then return end
     color = color:lower()
@@ -327,9 +331,10 @@ local function getStylusColor(stroke, highlight, night_mode)
     elseif color == "white" then
         bb_color = Blitbuffer.colorFromString("#FFFFFF")
     elseif highlight and highlight.getHighlightColor then
-        -- Match the plugin's renderer, including custom PDF highlight colors
-        -- and night mode.
-        bb_color = highlight:getHighlightColor(color, nil, night_mode)
+        -- Match the plugin's palette, including custom PDF highlight colors.
+        -- Like highlights, the PDF gets the day colors whatever the display
+        -- mode: night mode inverts the rendered page, annotations included.
+        bb_color = highlight:getHighlightColor(color)
     else
         local custom_colors = G_reader_settings:readSetting("highlight_custom_colors", {})
         local custom_color = custom_colors[color]
@@ -347,113 +352,282 @@ local function getStylusColor(stroke, highlight, night_mode)
     return { r = rgb.r, g = rgb.g, b = rgb.b }
 end
 
-local function makeStylusAnnotationName(pageno, index, stroke, points, color, width, opacity)
-    -- Use a compact deterministic name so repeated writes can retain unchanged
-    -- annotations and remove strokes that were erased in the plugin.
-    local hash = 5381
-    local function add(value)
-        value = tostring(value)
-        for i = 1, #value do
-            hash = (hash * 33 + value:byte(i)) % 2147483647
-        end
+-- Stroke annotation names hash the text of the stroke's values with
+-- h = (h * 33 + byte) % HASH_MOD, starting from 5381. All the strokes of a book
+-- are hashed every time it is opened, so hash the values that both names below
+-- share once. The hash is linear: hashing a string s from the state h gives
+-- h * 33^#s + (hash of s from 0), modulo HASH_MOD.
+local HASH_MOD = 2147483647
+
+local function hashString(h, s)
+    local byte = string.byte
+    for i = 1, #s do
+        h = (h * 33 + byte(s, i)) % HASH_MOD
     end
-    add(pageno)
-    add(index)
-    add(width)
-    add(opacity)
-    add(stroke.color or "")
-    add(color.r)
-    add(color.g)
-    add(color.b)
-    for _, point in ipairs(points) do
-        add(point.x)
-        add(point.y)
-    end
-    return STYLUS_ANNOTATION_PREFIX .. pageno .. ":" .. index .. ":" .. math.floor(hash)
+    return h
 end
 
-local function prepareStylusAnnotations(strokes, page_count, highlight, night_mode)
+-- a * b % HASH_MOD, for a and b below HASH_MOD, exact with doubles (< 2^53).
+local function mulMod(a, b)
+    local hi, lo = math.floor(b / 65536), b % 65536
+    return ((a * hi) % HASH_MOD * 65536 + a * lo) % HASH_MOD
+end
+
+local function powMod33(n)
+    local result, base = 1, 33
+    while n > 0 do
+        if n % 2 == 1 then result = mulMod(result, base) end
+        base = mulMod(base, base)
+        n = math.floor(n / 2)
+    end
+    return result
+end
+
+-- Names for a stroke annotation: a compact deterministic name lets repeated
+-- writes keep unchanged annotations and remove only the strokes erased in the
+-- plugin. It must depend on nothing but the stroke itself: anything else that
+-- changes (e.g. its position among the page's strokes, or the display mode)
+-- renames, so deletes and re-adds, strokes that did not change.
+-- Earlier versions also hashed the stroke's position (index) among the valid
+-- strokes of its page, after its page number. Annotations already written with
+-- such a legacy name are kept as they are: renaming them all would delete and
+-- re-add every stroke of the book at once.
+local function hashStylusAnnotation(pageno, stroke, points, color, width, opacity)
+    local parts = {
+        tostring(width), tostring(opacity), tostring(stroke.color or ""),
+        tostring(color.r), tostring(color.g), tostring(color.b),
+    }
+    for _, point in ipairs(points) do
+        parts[#parts + 1] = tostring(point.x)
+        parts[#parts + 1] = tostring(point.y)
+    end
+    local rest = table.concat(parts)
+    return {
+        page_hash = hashString(5381, tostring(pageno)),
+        rest_hash = hashString(0, rest),
+        rest_pow = powMod33(#rest),
+    }
+end
+
+local function finishStylusAnnotationHash(hash, h)
+    return math.floor((mulMod(h, hash.rest_pow) + hash.rest_hash) % HASH_MOD)
+end
+
+local function makeStylusAnnotationName(pageno, hash)
+    return STYLUS_ANNOTATION_PREFIX .. pageno .. ":" .. finishStylusAnnotationHash(hash, hash.page_hash)
+end
+
+local function makeLegacyStylusAnnotationName(pageno, index, hash)
+    return STYLUS_ANNOTATION_PREFIX .. pageno .. ":" .. index .. ":"
+        .. finishStylusAnnotationHash(hash, hashString(hash.page_hash, tostring(index)))
+end
+
+-- The colors of a sync are memoized by color name (false without one).
+local function getMemoizedStylusColor(colors, stroke, highlight)
+    local key = stroke.color or false
+    local color = colors[key]
+    if color == nil then
+        color = getStylusColor(stroke, highlight) or false
+        colors[key] = color
+    end
+    return color
+end
+
+-- Validate and convert a stroke into what its annotation needs, or nil.
+local function prepareStylusAnnotation(stroke, page_count, highlight, colors)
+    local pageno = tonumber(stroke.page)
+    local coords = stroke.points
+    if not (isFiniteNumber(pageno) and pageno == math.floor(pageno)
+        and pageno >= 1 and pageno <= page_count
+        and type(coords) == "table" and #coords >= 2 and #coords % 2 == 0) then
+        return
+    end
+    local points = {}
+    for i = 1, #coords, 2 do
+        local x, y = coords[i], coords[i + 1]
+        if not isFiniteNumber(x) or not isFiniteNumber(y) then return end
+        -- The plugin persists coordinates at quarter-point precision.
+        -- Export the same coordinates so the PDF and plugin sidecar stay aligned.
+        points[#points + 1] = {
+            x = math.floor(x * 4 + 0.5) / 4,
+            y = math.floor(y * 4 + 0.5) / 4,
+        }
+    end
+    local color = getMemoizedStylusColor(colors, stroke, highlight)
+    local width = tonumber(stroke.width) or 1
+    local opacity = tonumber(stroke.alpha) or 1
+    if not (color and isFiniteNumber(width) and width > 0 and isFiniteNumber(opacity)) then
+        return
+    end
+    opacity = math.max(0, math.min(1, opacity))
+    local annotation = {
+        page = pageno,
+        points = points,
+        color = color,
+        width = width,
+        opacity = opacity,
+    }
+    annotation.hash = hashStylusAnnotation(pageno, stroke, points, color, width, opacity)
+    annotation.name = makeStylusAnnotationName(pageno, annotation.hash)
+    return annotation
+end
+
+-- Formatting and hashing the points of every stroke of a book takes a while,
+-- and strokes are synced on every trip to the background: reuse the
+-- annotation prepared for a stroke while what it depends on stays the same.
+local function isCachedStylusAnnotationValid(cached, stroke, color)
+    return cached.stroke_points == stroke.points and cached.point_count == #stroke.points
+        and cached.stroke_page == stroke.page and cached.stroke_color == stroke.color
+        and cached.stroke_width == stroke.width and cached.stroke_alpha == stroke.alpha
+        -- e.g. custom highlight colors may change
+        and color and cached.color.r == color.r and cached.color.g == color.g
+        and cached.color.b == color.b
+end
+
+function PdfDocument:_prepareStylusAnnotations(strokes, highlight)
+    local page_count = self.info.number_of_pages
+    local cache = self._stylus_annotation_cache
+    if not cache then
+        cache = setmetatable({}, { __mode = "k" })
+        self._stylus_annotation_cache = cache
+    end
+    local colors = {}
     local desired = {}
+    local legacy_names = {} -- per page, legacy name -> name
     local page_indexes = {}
     local count = 0
     for _, stroke in ipairs(strokes or {}) do
-        local pageno = tonumber(stroke.page)
-        local coords = stroke.points
-        if isFiniteNumber(pageno) and pageno == math.floor(pageno)
-            and pageno >= 1 and pageno <= page_count
-            and type(coords) == "table" and #coords >= 2 and #coords % 2 == 0 then
-            local points, valid = {}, true
-            for i = 1, #coords, 2 do
-                local x, y = coords[i], coords[i + 1]
-                if not isFiniteNumber(x) or not isFiniteNumber(y) then
-                    valid = false
-                    break
-                end
-                -- The plugin persists coordinates at quarter-point precision.
-                -- Export the same coordinates so the PDF and plugin sidecar stay aligned.
-                points[#points + 1] = {
-                    x = math.floor(x * 4 + 0.5) / 4,
-                    y = math.floor(y * 4 + 0.5) / 4,
-                }
-            end
-            local color = getStylusColor(stroke, highlight, night_mode)
-            local width = tonumber(stroke.width) or 1
-            local opacity = tonumber(stroke.alpha) or 1
-            if valid and color and isFiniteNumber(width) and width > 0
-                and isFiniteNumber(opacity) then
-                opacity = math.max(0, math.min(1, opacity))
-                page_indexes[pageno] = (page_indexes[pageno] or 0) + 1
-                local index = page_indexes[pageno]
-                local name = makeStylusAnnotationName(pageno, index, stroke, points, color, width, opacity)
-                desired[pageno] = desired[pageno] or {}
-                desired[pageno][name] = {
-                    points = points,
-                    color = color,
-                    width = width,
-                    opacity = opacity,
-                }
-                count = count + 1
+        local annotation = cache[stroke]
+        if annotation then
+            local color = getMemoizedStylusColor(colors, stroke, highlight)
+            if not isCachedStylusAnnotationValid(annotation, stroke, color) then
+                annotation = nil
             end
         end
+        if not annotation then
+            annotation = prepareStylusAnnotation(stroke, page_count, highlight, colors)
+            if annotation then
+                annotation.stroke_points = stroke.points
+                annotation.point_count = #stroke.points
+                annotation.stroke_page = stroke.page
+                annotation.stroke_color = stroke.color
+                annotation.stroke_width = stroke.width
+                annotation.stroke_alpha = stroke.alpha
+                cache[stroke] = annotation
+            end
+        end
+        if annotation then
+            local pageno = annotation.page
+            local index = (page_indexes[pageno] or 0) + 1
+            page_indexes[pageno] = index
+            if annotation.legacy_index ~= index then
+                annotation.legacy_index = index
+                annotation.legacy_name = makeLegacyStylusAnnotationName(pageno, index, annotation.hash)
+            end
+            desired[pageno] = desired[pageno] or {}
+            legacy_names[pageno] = legacy_names[pageno] or {}
+            -- Identical strokes on a page (or a hash collision) get a
+            -- numbered name, in stroke order.
+            local name, n = annotation.name, 1
+            while desired[pageno][name] do
+                n = n + 1
+                name = annotation.name .. ":" .. n
+            end
+            desired[pageno][name] = annotation
+            legacy_names[pageno][annotation.legacy_name] = name
+            count = count + 1
+        end
     end
-    return desired, count
+    return desired, legacy_names, count
 end
 
-function PdfDocument:syncStylusAnnotations(strokes, highlight, night_mode)
+-- Which stylus annotations of a page to keep and which to delete, given the
+-- names of those it holds: one per wanted stroke, under its name or its legacy
+-- name. Returns the set of wanted names present, the list of the indexes of
+-- the annotations to delete, and whether some wanted names are missing.
+local function diffStylusAnnotations(names, page_desired, page_legacy_names)
+    local present, delete = {}, {}
+    for i, name in ipairs(names) do
+        if not page_desired[name] then
+            name = page_legacy_names[name]
+        end
+        if name and not present[name] then
+            present[name] = true
+        else
+            delete[#delete + 1] = i
+        end
+    end
+    local missing = false
+    for name in pairs(page_desired) do
+        if not present[name] then
+            missing = true
+            break
+        end
+    end
+    return present, delete, missing
+end
+
+function PdfDocument:syncStylusAnnotations(strokes, highlight)
     local can_write = self:_checkIfWritable()
     if can_write ~= true then return can_write end
 
-    local desired, count = prepareStylusAnnotations(
-        strokes, self.info.number_of_pages, highlight, night_mode)
+    local desired, legacy_names, count = self:_prepareStylusAnnotations(strokes, highlight)
+    -- Names of the stylus annotations of each page, as left by the previous
+    -- sync: only this sync changes them, so pages whose names already match
+    -- the strokes need not be opened.
+    local page_names = self._stylus_annotation_names
+    if not page_names then
+        page_names = {}
+        self._stylus_annotation_names = page_names
+    end
     local changed = false
     for pageno = 1, self.info.number_of_pages do
-        local page = self._document:openPage(pageno)
-        local ok, err = pcall(function()
-            local existing = page:getInkAnnotationsWithNamePrefix(STYLUS_ANNOTATION_PREFIX)
-            local existing_by_name = {}
-            for _, annotation in ipairs(existing) do
-                existing_by_name[annotation.name] = annotation.annot
-            end
-
-            local page_desired = desired[pageno] or {}
-            for name, annot in pairs(existing_by_name) do
-                if not page_desired[name] then
-                    page:deleteAnnotation(annot)
+        local page_desired = desired[pageno] or {}
+        local page_legacy_names = legacy_names[pageno] or {}
+        local up_to_date = false
+        if page_names[pageno] then
+            local _, delete, missing = diffStylusAnnotations(page_names[pageno], page_desired, page_legacy_names)
+            up_to_date = #delete == 0 and not missing
+        end
+        if not up_to_date then
+            local page = self._document:openPage(pageno)
+            local ok, err = pcall(function()
+                local existing = page:getInkAnnotationsWithNamePrefix(STYLUS_ANNOTATION_PREFIX)
+                local names = {}
+                for i, annotation in ipairs(existing) do
+                    names[i] = annotation.name
+                end
+                local present, delete, missing = diffStylusAnnotations(names, page_desired, page_legacy_names)
+                local deleted = {}
+                for _, i in ipairs(delete) do
+                    page:deleteAnnotation(existing[i].annot)
+                    deleted[i] = true
+                    self.deleted_annotations = self.deleted_annotations + 1
                     changed = true
                 end
-            end
-
-            for name, annotation in pairs(page_desired) do
-                if not existing_by_name[name] then
-                    page:addInkAnnotation(
-                        { annotation.points }, annotation.color, annotation.width,
-                        annotation.opacity, name)
-                    changed = true
+                local kept = {}
+                for i, name in ipairs(names) do
+                    if not deleted[i] then kept[#kept + 1] = name end
                 end
+                if missing then
+                    for name, annotation in pairs(page_desired) do
+                        if not present[name] then
+                            page:addInkAnnotation(
+                                { annotation.points }, annotation.color, annotation.width,
+                                annotation.opacity, name)
+                            kept[#kept + 1] = name
+                            changed = true
+                        end
+                    end
+                end
+                page_names[pageno] = kept
+            end)
+            page:close()
+            if not ok then
+                page_names[pageno] = nil
+                error(err)
             end
-        end)
-        page:close()
-        if not ok then error(err) end
+        end
     end
 
     if changed then
@@ -505,6 +679,7 @@ function PdfDocument:deleteForeignInkAnnotations()
                 local name = annotation.name
                 if not (name and name:sub(1, #STYLUS_ANNOTATION_PREFIX) == STYLUS_ANNOTATION_PREFIX) then
                     page:deleteAnnotation(annotation.annot)
+                    self.deleted_annotations = self.deleted_annotations + 1
                     deleted = deleted + 1
                 end
             end
@@ -532,14 +707,43 @@ function PdfDocument:getEmbeddedAnnotations()
     return next(annotations) and annotations
 end
 
--- Write a complete copy of the document next to the original, then atomically
--- replace the original with it. MuPDF keeps reading the opened document through
--- its existing file handle, which still refers to the replaced file.
+-- An incremental update is appended to the file and never removed: whatever it
+-- replaces or deletes (edited objects, deleted annotations) stays in the file
+-- as garbage, and only rewriting the whole file removes it. The file is
+-- rewritten once it holds this many versions (the original plus one
+-- incremental update per session that saved it): an incremental save first
+-- reads the whole file back, which then takes longer than rewriting it
+-- (measured on a 163 MB PDF with 124 versions: 7.6 s versus 4.1 s)...
+local MAX_PDF_VERSIONS = 8
+-- ... or, when closing the document, after deleting this many annotations
+-- (e.g. after erasing many strokes). Saves are frequent (e.g. on every trip to
+-- the background) and incremental ones stay cheap (0.3 s on a 50 MB PDF).
+local MAX_DELETED_ANNOTATIONS = 50
+
+-- Packing objects into object streams halves the size of a heavily annotated
+-- PDF, but holds them all in memory while writing, which gets slow with a
+-- file bloated by many incremental updates: 3.7 s for a 51 MB PDF, 32 s for
+-- a 163 MB one with 124 versions (4.1 s without object streams), on an
+-- Android e-reader. Above this size, the copy goes without them; it is small
+-- enough to get them the next time it is rewritten.
+local MAX_PDF_SIZE_FOR_OBJECT_STREAMS = 64 * 1024 * 1024
+
+local function useObjectStreams(file)
+    local size = lfs.attributes(file, "size")
+    return size ~= nil and size <= MAX_PDF_SIZE_FOR_OBJECT_STREAMS
+end
+
+-- Write a complete copy of the document next to the original, without the
+-- objects nothing refers to anymore, then atomically replace the original with
+-- it. MuPDF keeps reading the opened document through its existing file handle,
+-- which still refers to the replaced file.
 function PdfDocument:_writeDocumentFull()
     local tmp_file = self.file .. ".koreader-tmp"
     os.remove(tmp_file)
-    -- A different target path makes MuPDF write a full (non-incremental) PDF.
-    local ok, err = pcall(self._document.writeDocument, self._document, tmp_file)
+    -- A different target path makes MuPDF write a full (non-incremental),
+    -- garbage-collected PDF.
+    local ok, err = pcall(self._document.writeDocument, self._document, tmp_file,
+        not useObjectStreams(self.file))
     if not ok then
         os.remove(tmp_file)
         error(err, 0)
@@ -551,29 +755,59 @@ function PdfDocument:_writeDocumentFull()
     end
 end
 
-function PdfDocument:writeDocument()
+function PdfDocument:_countVersions()
+    local ok, versions = pcall(self._document.countVersions, self._document)
+    if not ok then
+        logger.warn("could not count PDF versions:", versions)
+        return 1
+    end
+    return versions
+end
+
+-- Whether the file holds enough garbage to be rewritten as a whole.
+function PdfDocument:_needsCompaction(closing)
+    return self:_countVersions() >= MAX_PDF_VERSIONS
+        or closing and self.deleted_annotations >= MAX_DELETED_ANNOTATIONS
+end
+
+--[[--
+Whether closing the document will rewrite the whole file, which can take a
+while with big files.
+--]]
+function PdfDocument:willCompactOnClose()
+    if self.has_written_full_document then
+        return self.is_edited
+    end
+    return (self.is_edited or self.has_written_document) and self:_needsCompaction(true)
+end
+
+-- Every incremental save of an opened document rewrites the same update,
+-- appended to the file as it was when opened, with all the changes made since
+-- (see writeDocument in ffi/mupdf): it costs only the size of these changes.
+function PdfDocument:writeDocument(closing)
     logger.info("writing document to", self.file)
-    -- MuPDF appends an incremental update at the file size it saw when the
-    -- document was opened and does not track the file after saving. A second
-    -- incremental save of the same opened document is therefore written over
-    -- the first one, while its trailer still points (/Prev) at the overwritten
-    -- xref: the PDF breaks, MuPDF "repairs" it on the next open and then refuses
-    -- incremental writes to it. This happens as soon as annotations are saved
-    -- more than once per session (e.g. on every trip to the background).
-    -- So only the first save of an opened document is incremental; later saves,
-    -- and saves that cannot be incremental (repaired files), rewrite the whole
-    -- document.
-    if not self.has_written_document then
+    -- Once the file has been replaced by a complete copy, an update would be
+    -- appended to the file as it was when opened, so MuPDF would first copy
+    -- that whole old file, garbage included, back: keep rewriting it as a whole.
+    local compact = self:_needsCompaction(closing)
+    if compact then
+        logger.info("rewriting the PDF without its garbage: versions", self:_countVersions(),
+            "deleted annotations", self.deleted_annotations)
+    end
+    if not self.has_written_full_document and not compact then
         local ok, err = pcall(self._document.writeDocument, self._document, self.file)
         if ok then
             self.has_written_document = true
             self.is_edited = false
             return
         end
+        -- e.g. repaired files cannot be written incrementally
         logger.warn("incremental PDF write failed, rewriting the whole document:", err)
     end
     self:_writeDocumentFull()
     self.has_written_document = true
+    self.has_written_full_document = true
+    self.deleted_annotations = 0
     self.is_edited = false
 end
 
@@ -585,7 +819,7 @@ function PdfDocument:writeInvertedCopy(target_file)
             error("password protected PDFs are not supported", 0)
         end
         doc:invertColors()
-        doc:writeDocument(target_file)
+        doc:writeDocument(target_file, not useObjectStreams(self.file))
     end)
     doc:close()
     if not ok then
@@ -599,8 +833,10 @@ function PdfDocument:close()
     local DocumentRegistry = require("document/documentregistry")
     if DocumentRegistry:getReferenceCount(self.file) == 1 then
         -- We're the final reference to this Document instance.
-        if self.is_edited then
-            self:writeDocument()
+        -- Also rewrite a file saved earlier in this session if it needs it.
+        if self.is_edited or (self.has_written_document
+                and not self.has_written_full_document and self:_needsCompaction(true)) then
+            self:writeDocument(true)
         end
     end
 

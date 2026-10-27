@@ -2355,12 +2355,15 @@ function ReaderHighlight:syncStylusAnnotationsToPdf()
     if stylus.current_stroke and stylus.endStroke then
         stylus:endStroke()
     end
+    -- Every change of the strokes schedules that write: without one pending,
+    -- the sidecar is up to date, and rewriting it (megabytes for a heavily
+    -- annotated book) on every trip to the background is wasted time.
     if stylus.pending_save then
         UIManager:unschedule(stylus.pending_save)
         stylus.pending_save = nil
+        stylus:saveStrokes()
     end
-    stylus:saveStrokes()
-    return self.document:syncStylusAnnotations(stylus.store.strokes, self, Screen.night_mode)
+    return self.document:syncStylusAnnotations(stylus.store.strokes, self)
 end
 
 function ReaderHighlight:onCloseDocument()
@@ -2368,6 +2371,20 @@ function ReaderHighlight:onCloseDocument()
         local ok, err = pcall(self.syncStylusAnnotationsToPdf, self)
         if not ok then
             logger.err("Failed to sync Stylus Annotations into PDF:", err)
+        end
+    end
+    -- Closing the document may rewrite the whole PDF to drop the garbage its
+    -- incremental updates left: say so, as this can take a while.
+    if self.document.willCompactOnClose then
+        local ok, compact = pcall(self.document.willCompactOnClose, self.document)
+        if ok and compact then
+            local msg = InfoMessage:new{
+                text = _("Optimizing PDF file size…"),
+                dismissable = false,
+            }
+            UIManager:show(msg)
+            UIManager:forceRePaint()
+            UIManager:nextTick(function() UIManager:close(msg) end)
         end
     end
 end
